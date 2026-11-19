@@ -90,7 +90,8 @@ jobs:
     steps:
       - name: Get Appium's WebDriverAgent (latest release)
         run: |
-          tag=$(curl -fsSL https://api.github.com/repos/appium/WebDriverAgent/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+          # The newest version tag (the API refuses anonymous runners now and then).
+          tag=$(git ls-remote --tags --refs --sort=-v:refname https://github.com/appium/WebDriverAgent.git 'v*' | head -1 | sed 's#.*refs/tags/##')
           echo "WebDriverAgent $tag"
           git clone --depth 1 --branch "$tag" https://github.com/appium/WebDriverAgent.git wda-src
       - name: Build the runner for testing (unsigned)
