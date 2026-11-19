@@ -1,0 +1,35 @@
+# XcodeGen spec for the Phase 0 test app (CI runs `xcodegen generate`; no .xcodeproj in the repo).
+name: TapFlowSpike
+options:
+  bundleIdPrefix: io.github.hilbert0619
+  deploymentTarget:
+    iOS: "17.4"
+targets:
+  TapFlowSpike:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: TapFlow Test
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        UILaunchScreen: {}
+        UIBackgroundModes: [audio]
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSLocalNetworkUsageDescription: TapFlow talks to this iPhone's own developer services through the loopback VPN.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.hilbert0619.TapFlowSpike
+        MARKETING_VERSION: 0.0.1
+        CURRENT_PROJECT_VERSION: 1
+        SWIFT_VERSION: "5.0"
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridging.h
+        HEADER_SEARCH_PATHS: $(SRCROOT)/../engine/include
+        LIBRARY_SEARCH_PATHS: $(SRCROOT)/../engine/target/aarch64-apple-ios/release
+        OTHER_LDFLAGS: -ltapflow_engine
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGNING_ALLOWED: "NO"

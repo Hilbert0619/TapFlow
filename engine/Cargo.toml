@@ -1,0 +1,36 @@
+[package]
+name = "tapflow-engine"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+description = "TapFlow's engine: taps on this iPhone through its own developer services (Phase 0 spike)"
+publish = false
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+idevice = { version = "=0.1.68", default-features = false, features = [
+  "ring",
+  "tcp",
+  "heartbeat",
+  "core_device_proxy",
+  "tunnel_tcp_stack",
+  "rsd",
+  "core_device",
+  "display_stream",
+  "mobile_image_mounter",
+  "tss",
+  "installation_proxy",
+  "xctest",
+  "wda",
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+uuid = { version = "1", features = ["v4"] }
+plist = "1.8"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,124 @@
+name: Spike
+
+# Phase 0: the test app (Rust engine + SwiftUI) and a WebDriverAgent runner, as IPAs for iloader.
+# Runs on pushes touching them and by hand: `gh workflow run spike.yml`.
+on:
+  push:
+    paths: [engine/**, Spike/**, .github/workflows/spike.yml]
+  workflow_dispatch:
+    inputs:
+      wda:
+        description: Also build the WebDriverAgent runner IPA
+        type: boolean
+        default: true
+
+concurrency:
+  group: spike-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Engine compiles (Linux, fast)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+      - name: cargo check
+        working-directory: engine
+        run: cargo check --locked || cargo check
+
+  app:
+    name: Test app IPA
+    needs: check
+    runs-on: macos-26
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+          key: ios
+      - name: Build the engine for iPhones
+        working-directory: engine
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "17.4"
+        run: |
+          rustup target add aarch64-apple-ios
+          cargo build --release --target aarch64-apple-ios
+          ls -la target/aarch64-apple-ios/release/libtapflow_engine.a
+      - name: Generate the Xcode project
+        working-directory: Spike
+        run: |
+          brew install xcodegen
+          xcodegen generate
+      - name: Build the app (unsigned)
+        working-directory: Spike
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project TapFlowSpike.xcodeproj \
+            -scheme TapFlowSpike \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            | xcbeautify --renderer github-actions
+      - name: Package the IPA
+        working-directory: Spike
+        run: |
+          app=build/Build/Products/Release-iphoneos/TapFlowSpike.app
+          test -d "$app"
+          codesign --force --sign - "$app"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" -c "Print :MinimumOSVersion" "$app/Info.plist"
+          mkdir -p ipa/Payload && cp -R "$app" ipa/Payload/
+          (cd ipa && zip -qry ../TapFlowSpike.ipa Payload)
+          ls -la TapFlowSpike.ipa
+      - uses: actions/upload-artifact@v7
+        with:
+          name: TapFlowSpike-ipa
+          path: Spike/TapFlowSpike.ipa
+          retention-days: 30
+
+  wda:
+    name: WebDriverAgent runner IPA
+    if: github.event_name == 'push' || inputs.wda
+    runs-on: macos-26
+    timeout-minutes: 40
+    steps:
+      - name: Get Appium's WebDriverAgent (latest release)
+        run: |
+          tag=$(curl -fsSL https://api.github.com/repos/appium/WebDriverAgent/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+          echo "WebDriverAgent $tag"
+          git clone --depth 1 --branch "$tag" https://github.com/appium/WebDriverAgent.git wda-src
+      - name: Build the runner for testing (unsigned)
+        working-directory: wda-src
+        run: |
+          set -o pipefail
+          xcodebuild build-for-testing \
+            -project WebDriverAgent.xcodeproj \
+            -scheme WebDriverAgentRunner \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            | xcbeautify --renderer github-actions
+      - name: Package the IPA
+        working-directory: wda-src
+        run: |
+          app=$(find build/Build/Products -maxdepth 2 -name 'WebDriverAgentRunner-Runner.app' -type d | head -1)
+          test -n "$app"
+          ls "$app" "$app/PlugIns" "$app/Frameworks"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$app/Info.plist"
+          # Nested bundles first, so sideloaders that keep signatures see valid ones.
+          find "$app/Frameworks" "$app/PlugIns" -depth \( -name '*.framework' -o -name '*.dylib' -o -name '*.xctest' \) -exec codesign --force --sign - {} \;
+          codesign --force --sign - "$app"
+          mkdir -p ipa/Payload && cp -R "$app" ipa/Payload/
+          (cd ipa && zip -qry ../WebDriverAgentRunner.ipa Payload)
+          ls -la WebDriverAgentRunner.ipa
+      - uses: actions/upload-artifact@v7
+        with:
+          name: WebDriverAgentRunner-ipa
+          path: wda-src/WebDriverAgentRunner.ipa
+          retention-days: 30

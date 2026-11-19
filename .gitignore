@@ -1,0 +1,4 @@
+engine/target/
+Spike/build/
+Spike/*.xcodeproj/
+.DS_Store
