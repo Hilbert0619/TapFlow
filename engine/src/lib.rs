@@ -23,21 +23,23 @@ use idevice::{
     mobile_image_mounter::ImageMounter,
     pairing_file::PairingFile,
     provider::{IdeviceProvider, TcpProvider},
+    remote_pairing::{RemotePairingClient, RpPairingFile, RpPairingSocket, connect_tls_psk_tunnel_native},
     rsd::RsdHandshake,
     services::dvt::xctest::{TestConfig, WdaRunHandle, XCUITestService},
     services::installation_proxy::InstallationProxyClient,
-    tcp::handle::AdapterHandle,
+    tcp::{adapter::Adapter, handle::AdapterHandle},
 };
 use tokio::{runtime::Runtime, sync::Mutex, task::JoinHandle};
 
 // MARK: - State
 
 struct Session {
-    pairing_file: PairingFile,
-    host: std::net::IpAddr,
+    /// With a lockdown pairing file (iloader's "Lockdown"); `None` with an RPPairing file (iOS 26.4+), which
+    /// gives the tunnel only: enough for HID and the disk image, not for the XCTest engine.
+    lockdown: Option<(PairingFile, std::net::IpAddr)>,
     adapter: AdapterHandle,
     handshake: RsdHandshake,
-    heartbeat: JoinHandle<()>,
+    heartbeat: Option<JoinHandle<()>>,
     hid: Option<HidSession>,
     wda: Option<WdaRunHandle>,
 }
@@ -50,13 +52,9 @@ struct HidSession {
 }
 
 impl Session {
-    fn provider(&self) -> TcpProvider {
-        TcpProvider {
-            addr: self.host,
-            scope_id: None,
-            pairing_file: self.pairing_file.clone(),
-            label: "TapFlow".to_string(),
-        }
+    fn provider(&self) -> Result<TcpProvider, String> {
+        let (pairing_file, host) = self.lockdown.as_ref().ok_or("this needs a Lockdown pairing file (not RPPairing)")?;
+        Ok(TcpProvider { addr: *host, scope_id: None, pairing_file: pairing_file.clone(), label: "TapFlow".to_string() })
     }
 }
 
@@ -151,16 +149,30 @@ macro_rules! with_session {
 
 // MARK: - Connecting
 
-/// Connects to the device at `host` (10.7.0.1 with LocalDevVPN) with the pairing file at `pairing_path`: a
-/// heartbeat, then the CoreDevice tunnel and its service list (RSD).
+/// Connects to the device at `host` (10.7.0.1 with LocalDevVPN) with the pairing file at `pairing_path`, and
+/// opens the CoreDevice tunnel and its service list (RSD). A Lockdown pairing file goes through lockdown (with a
+/// heartbeat); an RPPairing file (iOS 26.4+) through remote pairing on `rp_port` (49152 unless Bonjour says
+/// otherwise).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tf_connect(pairing_path: *const c_char, host: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn tf_connect(pairing_path: *const c_char, host: *const c_char, rp_port: u16) -> *mut c_char {
     let args = unsafe { (string(pairing_path), string(host)) };
     result(runtime().block_on(async move {
         let (path, host) = (args.0?, args.1?);
-        let pairing_file = PairingFile::read_from_file(&path).map_err(|e| format!("pairing file: {e:?}"))?;
+        let bytes = std::fs::read(&path).map_err(|e| format!("pairing file: {e}"))?;
         let host: std::net::IpAddr = host.parse().map_err(|e| format!("host: {e}"))?;
         disconnect().await;
+
+        let pairing_file = match PairingFile::from_bytes(&bytes) {
+            Ok(file) => file,
+            Err(lockdown_error) => {
+                let mut rp_file = RpPairingFile::from_bytes(&bytes)
+                    .map_err(|e| format!("neither a Lockdown ({lockdown_error:?}) nor an RPPairing file ({e:?})"))?;
+                let (adapter, handshake) = connect_rppairing(host, rp_port, &mut rp_file).await?;
+                *session().lock().await =
+                    Some(Session { lockdown: None, adapter, handshake, heartbeat: None, hid: None, wda: None });
+                return Ok(());
+            }
+        };
 
         let provider = TcpProvider { addr: host, scope_id: None, pairing_file: pairing_file.clone(), label: "TapFlow".into() };
         log(&format!("connecting to {host}…"));
@@ -190,11 +202,50 @@ pub unsafe extern "C" fn tf_connect(pairing_path: *const c_char, host: *const c_
         let mut adapter = adapter.to_async_handle();
         let stream = adapter.connect(rsd_port).await.map_err(|e| format!("RSD connect: {e:?}"))?;
         let handshake = RsdHandshake::new(stream).await.map_err(|e| format!("RSD handshake: {e:?}"))?;
-        log(&format!("tunnel up: {} services", handshake.services.len()));
+        log(&format!("tunnel up (Lockdown): {} services", handshake.services.len()));
 
-        *session().lock().await = Some(Session { pairing_file, host, adapter, handshake, heartbeat, hid: None, wda: None });
+        *session().lock().await = Some(Session {
+            lockdown: Some((pairing_file, host)),
+            adapter,
+            handshake,
+            heartbeat: Some(heartbeat),
+            hid: None,
+            wda: None,
+        });
         Ok(())
     }))
+}
+
+/// The tunnel through remote pairing, as idevice's FFI `tunnel_create_rppairing` (StikDebug's path since iOS 26.4).
+async fn connect_rppairing(
+    host: std::net::IpAddr,
+    port: u16,
+    pairing_file: &mut RpPairingFile,
+) -> Result<(AdapterHandle, RsdHandshake), String> {
+    log(&format!("connecting to {host}:{port} (RPPairing)…"));
+    let stream = tokio::net::TcpStream::connect((host, port)).await.map_err(|e| format!("connect {host}:{port}: {e}"))?;
+    let mut client = RemotePairingClient::new(RpPairingSocket::new(stream), "TapFlow");
+    client
+        .connect(pairing_file, || async { String::new() })
+        .await
+        .map_err(|e| format!("pair verify: {e:?}"))?;
+    let tunnel_port = client.create_tcp_listener().await.map_err(|e| format!("tunnel listener: {e:?}"))?;
+    let tunnel_stream =
+        tokio::net::TcpStream::connect((host, tunnel_port)).await.map_err(|e| format!("tunnel connect: {e}"))?;
+    let tunnel = connect_tls_psk_tunnel_native(tunnel_stream, client.encryption_key())
+        .await
+        .map_err(|e| format!("TLS tunnel: {e:?}"))?;
+    let client_ip: std::net::IpAddr = tunnel.info.client_address.parse().map_err(|e| format!("client address: {e}"))?;
+    let server_ip: std::net::IpAddr = tunnel.info.server_address.parse().map_err(|e| format!("server address: {e}"))?;
+    let mtu = tunnel.info.mtu as usize;
+    let rsd_port = tunnel.info.server_rsd_port;
+    let mut adapter = Adapter::new(Box::new(tunnel.into_inner()), client_ip, server_ip);
+    adapter.set_mss(mtu.saturating_sub(60));
+    let mut adapter = adapter.to_async_handle();
+    let stream = adapter.connect(rsd_port).await.map_err(|e| format!("RSD connect: {e:?}"))?;
+    let handshake = RsdHandshake::new(stream).await.map_err(|e| format!("RSD handshake: {e:?}"))?;
+    log(&format!("tunnel up (RPPairing): {} services", handshake.services.len()));
+    Ok((adapter, handshake))
 }
 
 async fn disconnect() {
@@ -205,7 +256,9 @@ async fn disconnect() {
         if let Some(wda) = old.wda.take() {
             wda.abort();
         }
-        old.heartbeat.abort();
+        if let Some(heartbeat) = old.heartbeat.take() {
+            heartbeat.abort();
+        }
         let _ = old.adapter.close().await;
         log("disconnected");
     }
@@ -244,31 +297,47 @@ pub extern "C" fn tf_services(out: *mut *mut c_char) -> *mut c_char {
 
 // MARK: - Developer disk image
 
-/// iOS version, Developer Mode and the mounted images.
+/// A device property from the RSD handshake (e.g. `OSVersion`, `ProductType`, `UniqueChipID`).
+fn property(s: &Session, key: &str) -> Option<plist::Value> {
+    s.handshake.properties.get(key).cloned()
+}
+
+/// The chip ID the disk image is personalized for: from RSD, else from lockdown.
+async fn unique_chip_id(s: &Session) -> Result<u64, String> {
+    if let Some(id) = property(s, "UniqueChipID").and_then(|v| v.as_unsigned_integer()) {
+        return Ok(id);
+    }
+    let provider = s.provider()?;
+    let (pairing_file, _) = s.lockdown.as_ref().ok_or("no UniqueChipID")?;
+    let mut lockdown = LockdownClient::connect(&provider).await.map_err(|e| format!("lockdown: {e:?}"))?;
+    lockdown.start_session(pairing_file).await.map_err(|e| format!("lockdown session: {e:?}"))?;
+    lockdown
+        .get_value(Some("UniqueChipID"), None)
+        .await
+        .map_err(|e| format!("UniqueChipID: {e:?}"))?
+        .as_unsigned_integer()
+        .ok_or_else(|| "UniqueChipID is not a number".to_string())
+}
+
+/// iOS version, how we're connected, Developer Mode and the mounted images.
 #[unsafe(no_mangle)]
 pub extern "C" fn tf_device_status(out: *mut *mut c_char) -> *mut c_char {
     result_with(
         runtime().block_on(async {
             with_session!(s, {
-                let provider = s.provider();
-                let mut lockdown = LockdownClient::connect(&provider).await.map_err(|e| format!("lockdown: {e:?}"))?;
-                lockdown.start_session(&s.pairing_file).await.map_err(|e| format!("lockdown session: {e:?}"))?;
-                let version = lockdown
-                    .get_value(Some("ProductVersion"), None)
+                let text = |key: &str| property(s, key).and_then(|v| v.as_string().map(str::to_owned)).unwrap_or_else(|| "?".into());
+                let header = format!(
+                    "iOS {} ({}), connected with {}",
+                    text("OSVersion"),
+                    text("ProductType"),
+                    if s.lockdown.is_some() { "Lockdown" } else { "RPPairing" }
+                );
+                let mut mounter = ImageMounter::connect_rsd(&mut s.adapter, &mut s.handshake)
                     .await
-                    .ok()
-                    .and_then(|v| v.as_string().map(str::to_owned))
-                    .unwrap_or_else(|| "?".into());
-                let model = lockdown
-                    .get_value(Some("ProductType"), None)
-                    .await
-                    .ok()
-                    .and_then(|v| v.as_string().map(str::to_owned))
-                    .unwrap_or_else(|| "?".into());
-                let mut mounter = ImageMounter::connect(&provider).await.map_err(|e| format!("image mounter: {e:?}"))?;
+                    .map_err(|e| format!("image mounter: {e:?}"))?;
                 let developer_mode = mounter.query_developer_mode_status().await.map_err(|e| format!("{e:?}"))?;
                 let images = mounter.copy_devices().await.map_err(|e| format!("{e:?}"))?;
-                Ok(format!("iOS {version} ({model})\nDeveloper Mode: {developer_mode}\nMounted images: {}", images.len()))
+                Ok(format!("{header}\nDeveloper Mode: {developer_mode}\nMounted images: {}", images.len()))
             })
         }),
         out,
@@ -284,19 +353,13 @@ pub unsafe extern "C" fn tf_mount_ddi(image: *const c_char, manifest: *const c_c
         let manifest = std::fs::read(args.1?).map_err(|e| format!("BuildManifest.plist: {e}"))?;
         let trust_cache = std::fs::read(args.2?).map_err(|e| format!("trust cache: {e}"))?;
         with_session!(s, {
-            let provider = s.provider();
-            let mut lockdown = LockdownClient::connect(&provider).await.map_err(|e| format!("lockdown: {e:?}"))?;
-            lockdown.start_session(&s.pairing_file).await.map_err(|e| format!("lockdown session: {e:?}"))?;
-            let chip_id = lockdown
-                .get_value(Some("UniqueChipID"), None)
+            let chip_id = unique_chip_id(s).await?;
+            let mut mounter = ImageMounter::connect_rsd(&mut s.adapter, &mut s.handshake)
                 .await
-                .map_err(|e| format!("UniqueChipID: {e:?}"))?
-                .as_unsigned_integer()
-                .ok_or("UniqueChipID is not a number")?;
-            let mut mounter = ImageMounter::connect(&provider).await.map_err(|e| format!("image mounter: {e:?}"))?;
+                .map_err(|e| format!("image mounter: {e:?}"))?;
             log("mounting the developer disk image (asks Apple to sign it)…");
             mounter
-                .mount_personalized(&provider, image, trust_cache, &manifest, None, chip_id)
+                .mount_personalized_rsd(&mut s.adapter, &mut s.handshake, image, trust_cache, &manifest, None, chip_id)
                 .await
                 .map_err(|e| format!("mount: {e:?}"))?;
             log("developer disk image mounted");
@@ -384,7 +447,7 @@ pub extern "C" fn tf_find_runners(out: *mut *mut c_char) -> *mut c_char {
     result_with(
         runtime().block_on(async {
             with_session!(s, {
-                let provider = s.provider();
+                let provider = s.provider()?;
                 let mut proxy = InstallationProxyClient::connect(&provider).await.map_err(|e| format!("installation proxy: {e:?}"))?;
                 let apps = proxy.get_apps(Some("User"), None).await.map_err(|e| format!("{e:?}"))?;
                 let mut ids: Vec<String> = apps.into_keys().filter(|id| id.to_lowercase().contains("xctrunner")).collect();
@@ -408,14 +471,14 @@ pub unsafe extern "C" fn tf_wda_start(bundle_id: *const c_char, out: *mut *mut c
                 if let Some(old) = s.wda.take() {
                     old.abort();
                 }
-                let provider = s.provider();
+                let provider = s.provider()?;
                 let mut proxy = InstallationProxyClient::connect(&provider).await.map_err(|e| format!("installation proxy: {e:?}"))?;
                 let config = TestConfig::from_installation_proxy(&mut proxy, &bundle_id, None)
                     .await
                     .map_err(|e| format!("runner {bundle_id}: {e:?}"))?;
                 log(&format!("launching {bundle_id}…"));
                 let started = Instant::now();
-                let service = XCUITestService::new(Arc::new(s.provider()) as Arc<dyn IdeviceProvider>);
+                let service = XCUITestService::new(Arc::new(s.provider()?) as Arc<dyn IdeviceProvider>);
                 let handle = service
                     .run_until_wda_ready(config, Duration::from_secs(60))
                     .await

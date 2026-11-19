@@ -50,8 +50,9 @@ enum Engine {
         }
     }
 
-    static func connect(pairingFile: URL, host: String) async throws {
-        try await run { tf_connect(pairingFile.path, host) }
+    /// `rpPort` is used with an RPPairing file only.
+    static func connect(pairingFile: URL, host: String, rpPort: UInt16) async throws {
+        try await run { tf_connect(pairingFile.path, host, rpPort) }
     }
 
     static func services() async throws -> String { try await text { tf_services($0) } }

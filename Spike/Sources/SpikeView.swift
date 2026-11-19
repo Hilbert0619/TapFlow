@@ -22,6 +22,7 @@ struct SpikeView: View {
     @ObservedObject private var log = Log.shared
     @AppStorage("host") private var host = "10.7.0.1"
     @AppStorage("runner") private var runner = ""
+    @AppStorage("rpPort") private var rpPort = 49152
     @State private var hasPairingFile = FileManager.default.fileExists(atPath: SpikeView.pairingURL.path)
     @State private var importing = false
     @State private var connected = false
@@ -53,7 +54,7 @@ struct SpikeView: View {
                 logSection
             }
             .navigationTitle("TapFlow Test")
-            .fileImporter(isPresented: $importing, allowedContentTypes: [.data, .propertyList, .xml]) { result in
+            .fileImporter(isPresented: $importing, allowedContentTypes: [.item]) { result in
                 importPairingFile(result)
             }
         }
@@ -66,6 +67,11 @@ struct SpikeView: View {
             Button(hasPairingFile ? "Pairing file ✓ (replace…)" : "Import Pairing File…") { importing = true }
             TextField("Device address", text: $host)
                 .keyboardType(.decimalPad)
+            LabeledContent("RPPairing port") {
+                TextField("49152", value: $rpPort, format: .number.grouping(.never))
+                    .keyboardType(.numberPad)
+                    .multilineTextAlignment(.trailing)
+            }
             Button(connected ? "Reconnect" : "Connect") { perform(connect) }
                 .disabled(!hasPairingFile || busy)
             if connected {
@@ -79,7 +85,7 @@ struct SpikeView: View {
         } header: {
             Text("1. Connect")
         } footer: {
-            Text("Turn on LocalDevVPN first. The pairing file comes from iloader on your PC (Manage pairing file).")
+            Text("Turn on LocalDevVPN first. The pairing file comes from iloader on your PC: Lockdown works for both engines; iOS 26.4 and later need RPPairing (HID engine only for now).")
         }
     }
 
@@ -181,7 +187,7 @@ struct SpikeView: View {
     private func connect() async throws {
         connected = false
         wdaPort = nil
-        try await Engine.connect(pairingFile: Self.pairingURL, host: host)
+        try await Engine.connect(pairingFile: Self.pairingURL, host: host, rpPort: UInt16(clamping: rpPort))
         connected = true
         info = try await Engine.deviceStatus()
     }

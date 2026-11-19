@@ -10,7 +10,7 @@ typedef void (*tf_log_callback)(const char *line);
 void tf_set_log(tf_log_callback callback);
 void tf_free(char *ptr);
 
-char *tf_connect(const char *pairing_path, const char *host);
+char *tf_connect(const char *pairing_path, const char *host, uint16_t rp_port);
 void tf_disconnect(void);
 char *tf_services(char **out);
 char *tf_device_status(char **out);

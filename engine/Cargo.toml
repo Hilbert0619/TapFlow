@@ -24,8 +24,9 @@ idevice = { version = "=0.1.68", default-features = false, features = [
   "installation_proxy",
   "xctest",
   "wda",
+  "remote_pairing",
 ] }
-tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "net"] }
 uuid = { version = "1", features = ["v4"] }
 plist = "1.8"
 
