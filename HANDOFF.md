@@ -84,3 +84,24 @@ StikDebug/Services/OnDevicePairingService.swift.
   "should work".
 - Don't bypass security mechanisms; if something needs my approval or sign-in, say exactly what to do.
 - "Complete the handover" means: finish the docs so a new session starts the next thing; don't start it.
+
+## Paused 2026-11-19: direction changed to PC-tethered
+
+- **On the phone alone it failed on iOS 27.0:** RPPairing reached port 49152, but pair-verify was reset by the
+  peer; Lockdown was refused (heartbeat Broken pipe). Not investigated further. Possible causes: the
+  remote-pairing port (StikDebug finds it with Bonjour) or iOS 27 changes.
+- **The owner's choice:** keep the iPhone plugged into the PC, with **controls on the PC**. A small TapFlow program
+  on Windows serves a local browser page: the phone's screen, click to place taps, drag to record gestures,
+  scripts, start/stop. Nothing extra on the iPhone.
+- **USB test so far** (official idevice-tools-windows-v0.1.68, SHA-256 checked, in the session scratchpad; the
+  DDI from the doronz88 mirror):
+  - Both phones are seen over usbmux: iPhone 15 Pro on iOS 27.0, iPhone 12 on iOS 18.3.
+  - DDI mounted on the 15 Pro; the 12 refused while locked.
+  - DVT screenshots work.
+  - One `hid button home` was accepted (the media-stream gate opened) but its effect wasn't confirmed.
+- **Resume with:**
+  1. **Ask the owner first** (they want to be asked before any access to their phones, every time).
+  2. With both phones unlocked on the Home Screen: press Home, swipe between pages, tap empty wallpaper.
+     Prefer checks that don't capture screen content; delete any screenshots afterwards.
+  3. Then plan and build the PC app: a Rust binary on idevice over usbmux, with the HID engine, or WDA if HID
+     fails on 18.3. Build it on CI windows-latest, with logic tests.
