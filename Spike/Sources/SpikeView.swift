@@ -85,7 +85,7 @@ struct SpikeView: View {
         } header: {
             Text("1. Connect")
         } footer: {
-            Text("Turn on LocalDevVPN first. The pairing file comes from iloader on your PC: Lockdown works for both engines; iOS 26.4 and later need RPPairing (HID engine only for now).")
+            Text("Turn on LocalDevVPN first. The pairing file comes from iloader on your PC (Manage Pairing File → Export); it holds both pairings and the app tries RPPairing first, then Lockdown.")
         }
     }
 

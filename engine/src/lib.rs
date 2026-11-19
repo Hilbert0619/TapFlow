@@ -150,9 +150,10 @@ macro_rules! with_session {
 // MARK: - Connecting
 
 /// Connects to the device at `host` (10.7.0.1 with LocalDevVPN) with the pairing file at `pairing_path`, and
-/// opens the CoreDevice tunnel and its service list (RSD). A Lockdown pairing file goes through lockdown (with a
-/// heartbeat); an RPPairing file (iOS 26.4+) through remote pairing on `rp_port` (49152 unless Bonjour says
-/// otherwise).
+/// opens the CoreDevice tunnel and its service list (RSD). iloader's exported file holds both pairings: the
+/// RPPairing one is tried first, through remote pairing on `rp_port` (49152 unless Bonjour says otherwise; the only
+/// way on iOS 26.4+, which refuses lockdown over the network); then the Lockdown one, with a heartbeat. The Lockdown
+/// pairing is kept for the XCTest engine either way.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tf_connect(pairing_path: *const c_char, host: *const c_char, rp_port: u16) -> *mut c_char {
     let args = unsafe { (string(pairing_path), string(host)) };
@@ -162,39 +163,43 @@ pub unsafe extern "C" fn tf_connect(pairing_path: *const c_char, host: *const c_
         let host: std::net::IpAddr = host.parse().map_err(|e| format!("host: {e}"))?;
         disconnect().await;
 
-        let pairing_file = match PairingFile::from_bytes(&bytes) {
-            Ok(file) => file,
-            Err(lockdown_error) => {
-                let mut rp_file = RpPairingFile::from_bytes(&bytes)
-                    .map_err(|e| format!("neither a Lockdown ({lockdown_error:?}) nor an RPPairing file ({e:?})"))?;
-                let (adapter, handshake) = connect_rppairing(host, rp_port, &mut rp_file).await?;
-                *session().lock().await =
-                    Some(Session { lockdown: None, adapter, handshake, heartbeat: None, hid: None, wda: None });
-                return Ok(());
+        let lockdown_file = PairingFile::from_bytes(&bytes);
+        let rp_file = RpPairingFile::from_bytes(&bytes);
+        log(&format!(
+            "pairing file holds: Lockdown {}, RPPairing {}",
+            if lockdown_file.is_ok() { "yes" } else { "no" },
+            if rp_file.is_ok() { "yes" } else { "no" }
+        ));
+        let pairing_file = match (lockdown_file, rp_file) {
+            (Err(lockdown_error), Err(rp_error)) => {
+                return Err(format!("neither a Lockdown ({lockdown_error:?}) nor an RPPairing file ({rp_error:?})"));
             }
+            (lockdown, Ok(mut rp_file)) => match connect_rppairing(host, rp_port, &mut rp_file).await {
+                Ok((adapter, handshake)) => {
+                    *session().lock().await = Some(Session {
+                        lockdown: lockdown.ok().map(|file| (file, host)),
+                        adapter,
+                        handshake,
+                        heartbeat: None,
+                        hid: None,
+                        wda: None,
+                    });
+                    return Ok(());
+                }
+                Err(rp_error) => match lockdown {
+                    Ok(file) => {
+                        log(&format!("RPPairing failed ({rp_error}); trying Lockdown"));
+                        file
+                    }
+                    Err(_) => return Err(rp_error),
+                },
+            },
+            (Ok(file), Err(_)) => file,
         };
 
         let provider = TcpProvider { addr: host, scope_id: None, pairing_file: pairing_file.clone(), label: "TapFlow".into() };
         log(&format!("connecting to {host}…"));
-        // The device drops a network lockdown connection without a heartbeat.
-        let mut heartbeat_client = HeartbeatClient::connect(&provider).await.map_err(|e| format!("heartbeat: {e:?}"))?;
-        let heartbeat = tokio::spawn(async move {
-            let mut interval = 15;
-            loop {
-                match heartbeat_client.get_marco(interval).await {
-                    Ok(next) => interval = next + 5,
-                    Err(e) => {
-                        log(&format!("heartbeat stopped: {e:?}"));
-                        return;
-                    }
-                }
-                if let Err(e) = heartbeat_client.send_polo().await {
-                    log(&format!("heartbeat stopped: {e:?}"));
-                    return;
-                }
-            }
-        });
-        log("heartbeat running");
+        let heartbeat = start_heartbeat(&provider).await?;
 
         let proxy = CoreDeviceProxy::connect(&provider).await.map_err(|e| format!("CoreDeviceProxy: {e:?}"))?;
         let rsd_port = proxy.tunnel_info().server_rsd_port;
@@ -214,6 +219,29 @@ pub unsafe extern "C" fn tf_connect(pairing_path: *const c_char, host: *const c_
         });
         Ok(())
     }))
+}
+
+/// Keeps a network lockdown connection alive: the device drops it without a heartbeat.
+async fn start_heartbeat(provider: &TcpProvider) -> Result<JoinHandle<()>, String> {
+    let mut client = HeartbeatClient::connect(provider).await.map_err(|e| format!("heartbeat: {e:?}"))?;
+    let handle = tokio::spawn(async move {
+        let mut interval = 15;
+        loop {
+            match client.get_marco(interval).await {
+                Ok(next) => interval = next + 5,
+                Err(e) => {
+                    log(&format!("heartbeat stopped: {e:?}"));
+                    return;
+                }
+            }
+            if let Err(e) = client.send_polo().await {
+                log(&format!("heartbeat stopped: {e:?}"));
+                return;
+            }
+        }
+    });
+    log("heartbeat running");
+    Ok(handle)
 }
 
 /// The tunnel through remote pairing, as idevice's FFI `tunnel_create_rppairing` (StikDebug's path since iOS 26.4).
@@ -472,6 +500,12 @@ pub unsafe extern "C" fn tf_wda_start(bundle_id: *const c_char, out: *mut *mut c
                     old.abort();
                 }
                 let provider = s.provider()?;
+                if s.heartbeat.is_none() {
+                    match start_heartbeat(&provider).await {
+                        Ok(handle) => s.heartbeat = Some(handle),
+                        Err(e) => log(&format!("no lockdown heartbeat ({e}); trying anyway")),
+                    }
+                }
                 let mut proxy = InstallationProxyClient::connect(&provider).await.map_err(|e| format!("installation proxy: {e:?}"))?;
                 let config = TestConfig::from_installation_proxy(&mut proxy, &bundle_id, None)
                     .await
