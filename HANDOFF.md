@@ -44,6 +44,13 @@ The plan, approved by the owner, is in `C:\Users\AI\.claude\plans\add-a-new-feat
 - the real app (pick the target app, screenshot, place a point, record a gesture, scripts, Live Activity
   controls).
 
+## Results so far
+
+- **2026-11-19, iOS 27.0, first build:** the build used the Lockdown half of iloader's combined pairing file, and
+  the heartbeat failed with "Broken pipe": iOS 26.4+ refuses lockdown over the network.
+- **Fix** (run 44581797843): RPPairing first, then Lockdown.
+- The owner's phones: **iOS 18.3 and 27.0**. Only TapFlow Test is installed so far, not the WDA runner.
+
 ## Next
 
 Wait for the owner's Phase 0 results (the log, the iOS versions, the HID true/false line, and what happened on

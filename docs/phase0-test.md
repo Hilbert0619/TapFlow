@@ -5,7 +5,7 @@ Two engines are tested:
 - **HID**: Apple's developer HID service, no extra app.
 - **XCTest**: a WebDriverAgent runner.
 
-Run this on each iPhone (iOS 18 and iOS 26). Files are in `C:\Users\AI\Downloads\TapFlow\`.
+Run this on each iPhone (the owner's run iOS 18.3 and iOS 27.0). Files are in `C:\Users\AI\Downloads\TapFlow\`.
 
 ## Once per phone
 
@@ -14,9 +14,9 @@ Run this on each iPhone (iOS 18 and iOS 26). Files are in `C:\Users\AI\Downloads
 2. **Developer Mode**: Settings → Privacy & Security → Developer Mode → on. The iPhone restarts; confirm with
    your passcode.
 3. **LocalDevVPN** from the App Store; open it and switch it on. It stays on while you test.
-4. **Pairing file** from iloader on the PC (pairing file / Manage pairing file):
-   - iOS 18 or iOS 26.0–26.3: choose **Lockdown**. Both engines then work.
-   - iOS 26.4 or later: choose **RPPairing**. Only the HID engine works with it for now.
+4. **Pairing file** from iloader on the PC: Manage Pairing File → Export. The exported file holds both pairings,
+   and the app tries RPPairing first and Lockdown second. iOS 26.4+ refuses Lockdown over the loopback; on iOS
+   27.0 that shows as "heartbeat: Broken pipe" in the first build.
 
    Send the file to the iPhone (AirDrop, or save to Files via iCloud/USB). In TapFlow Test, tap **Import Pairing
    File…** and pick it.
@@ -37,7 +37,7 @@ Run this on each iPhone (iOS 18 and iOS 26). Files are in `C:\Users\AI\Downloads
    - Tap **Start taps** and switch to the Calculator within 5 s. Each tap adds 1 to the display.
    - Leave it for 10 minutes. Halfway through, lock the iPhone for 30 s, then unlock it.
 5. **Speed**: set Every 50 ms and Taps 200, and run on the Calculator again. Does the display reach 200?
-6. **XCTest engine** (Lockdown file only):
+6. **XCTest engine** (iOS 18.3; needs the Lockdown half; install `WebDriverAgentRunner.ipa` first):
    - Choose Engine → XCTest (WDA).
    - Tap **Find WebDriverAgent runners**; the runner's ID fills in.
    - Tap **Launch runner** and wait up to a minute for "WDA ready on port 8100".
