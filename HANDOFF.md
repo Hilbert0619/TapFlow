@@ -99,6 +99,14 @@ StikDebug/Services/OnDevicePairingService.swift.
   - DDI mounted on the 15 Pro; the 12 refused while locked.
   - DVT screenshots work.
   - One `hid button home` was accepted (the media-stream gate opened) but its effect wasn't confirmed.
+- **2026-11-19, iPhone 12 on iOS 18.3, over USB** (owner allowed this phone and screenshots; the 15 Pro on iOS
+  27.0 is off limits for now):
+  - DDI (Xcode 27 personalized image) mounted fine while unlocked.
+  - RSD lists `com.apple.coredevice.hid.universalhidservice`, but a drag was refused: CoreDevice error 9021,
+    **"Remote control requires iOS 27.0 or later on this device."** The screen didn't change. `hid list` crashed
+    idevice-tools (UnexpectedEof) and the USB link dropped until replugged.
+  - **So the HID engine is iOS 27+ only. iOS 18 needs the WDA (XCTest) engine.** No WDA runner (or TapFlow /
+    CourseTable) is installed on the iPhone 12 yet; the owner installs `WebDriverAgentRunner.ipa` with iloader.
 - **Resume with:**
   1. **Ask the owner first** (they want to be asked before any access to their phones, every time).
   2. With both phones unlocked on the Home Screen: press Home, swipe between pages, tap empty wallpaper.
